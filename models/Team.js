@@ -4,29 +4,21 @@ const QRCode = require('qrcode');
 class Team {
   // Criar novo time
   static async create(gameId, name) {
-    // Gerar código de acesso único
     const accessCode = this.generateAccessCode();
-
     const [result] = await pool.execute(
       'INSERT INTO teams (game_id, name, access_code) VALUES (?, ?, ?)',
       [gameId, name, accessCode]
     );
-
     const teamId = result.insertId;
 
-    // Montar a URL usando seu domínio configurado no .env
     const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
     const participantUrl = `${baseUrl}/participant.html?code=${accessCode}`;
 
-    // Gerar QR Code direto com seu link
     const qrCodeDataUrl = await QRCode.toDataURL(participantUrl);
-
-    // Salvar QR Code no banco
     await pool.execute(
       'UPDATE teams SET qr_code = ? WHERE id = ?',
       [qrCodeDataUrl, teamId]
     );
-
     return { id: teamId, name, accessCode, qrCode: qrCodeDataUrl };
   }
 
@@ -66,19 +58,27 @@ class Team {
     );
   }
 
-  // Calcular pontuação total do time
+  // MUDANÇA 3: Média justa - só conta quem respondeu algo
   static async calculateTotalScore(teamId) {
-    // Pega a soma dos pontos de todos os participantes
+    // Soma dos pontos de todos os participantes
     const [sumResult] = await pool.execute(
-      'SELECT SUM(total_score) as total_points, COUNT(id) as num_participants FROM participants WHERE team_id = ?',
+      'SELECT SUM(total_score) as total_points FROM participants WHERE team_id = ?',
+      [teamId]
+    );
+    // MUDANÇA: Conta APENAS participantes que têm pelo menos 1 resposta no histórico
+    const [activeResult] = await pool.execute(
+      `SELECT COUNT(DISTINCT p.id) as active_participants 
+       FROM participants p 
+       INNER JOIN participant_answers pa ON p.id = pa.participant_id 
+       WHERE p.team_id = ?`,
       [teamId]
     );
 
     const totalPoints = sumResult[0].total_points || 0;
-    const numParticipants = sumResult[0].num_participants || 1; // Evita divisão por zero
+    const activeParticipants = activeResult[0].active_participants || 1; // Evita divisão por zero
 
-    // Calcula a média (arredondada)
-    const averageScore = Math.round(totalPoints / numParticipants);
+    // Calcula a média (arredondada) usando apenas participantes ativos
+    const averageScore = Math.round(totalPoints / activeParticipants);
 
     // Salva a média no time
     await this.updateScore(teamId, averageScore);
@@ -98,7 +98,6 @@ class Team {
        WHERE participants.team_id = ?`,
       [teamId]
     );
-
     const [correctRes] = await pool.execute(
       `SELECT COUNT(*) as correct FROM participant_answers 
        JOIN participants ON participant_answers.participant_id = participants.id 

@@ -12,22 +12,28 @@ module.exports = (io) => {
     socket.on('admin:connect', async (gameId) => {
       socket.join(`game:${gameId}:admin`);
       socket.gameId = gameId;
+      console.log(`[ADMIN] Conectado ao jogo ${gameId}`);
     });
 
     socket.on('admin:startGame', async (gameId) => {
       try {
         await pool.execute('UPDATE teams SET total_score = 0 WHERE game_id = ?', [gameId]);
         const [teams] = await pool.execute('SELECT id FROM teams WHERE game_id = ?', [gameId]);
+
         if (teams.length > 0) {
           const teamIds = teams.map(t => t.id).join(',');
           await pool.execute(`UPDATE participants SET total_score = 0 WHERE team_id IN (${teamIds})`);
           await pool.execute(`DELETE FROM participant_answers WHERE participant_id IN (SELECT id FROM participants WHERE team_id IN (${teamIds}))`);
         }
+
         await Game.updateStatus(gameId, 'active');
         await Game.updateCurrentQuestion(gameId, 0);
+
         io.to(`game:${gameId}`).emit('game:started');
+        console.log(`[GAME] Jogo ${gameId} iniciado`);
         startQuestion(gameId, 0);
       } catch (error) {
+        console.log(`[ERROR] startGame: ${error.message}`);
         socket.emit('error', { message: error.message });
       }
     });
@@ -43,11 +49,11 @@ module.exports = (io) => {
           finishGame(gameId);
         }
       } catch (error) {
+        console.log(`[ERROR] nextQuestion: ${error.message}`);
         socket.emit('error', { message: error.message });
       }
     });
 
-    // Botão "Voltar" (Destravado)
     socket.on('admin:reshowQuestion', async (gameId) => {
       const gameState = activeGames.get(gameId);
       const game = await Game.findById(gameId);
@@ -55,15 +61,13 @@ module.exports = (io) => {
 
       const timeElapsed = (Date.now() - gameState.startTime) / 1000;
 
-      // Se o tempo já acabou, mostra o Gráfico direto
       if (timeElapsed >= gameState.timeLimit) {
         sendStats(gameId);
         return;
       }
 
-      // Se ainda tem tempo, mostra a pergunta com o tempo que falta
       const question = game.questions[game.current_question_index];
-      const remainingTime = Math.max(0, Math.round(gameState.timeLimit - timeElapsed)); // Mínimo 0
+      const remainingTime = Math.max(0, Math.round(gameState.timeLimit - timeElapsed));
 
       const questionData = {
         id: question.id,
@@ -77,31 +81,36 @@ module.exports = (io) => {
     });
 
     socket.on('admin:showStats', (gameId) => sendStats(gameId));
+
     socket.on('admin:showRanking', async (gameId) => {
       const game = await Game.findById(gameId);
-      const isFinal = game && game.status === 'finished'; // Verifica se acabou
-      sendRanking(gameId, isFinal); // Passa o aviso
+      const isFinal = game && game.status === 'finished';
+      sendRanking(gameId, isFinal);
     });
+
     socket.on('admin:endGame', async (gameId) => finishGame(gameId));
 
     // --- PARTICIPANTE ---
     socket.on('participant:join', async ({ teamId, nickname }) => {
       try {
         const team = await Team.findByTeamId(teamId);
-        if (!team) return socket.emit('error', { message: 'Time não encontrado!' });
-
-        let participantId;
-        const [existing] = await pool.execute('SELECT id, total_score FROM participants WHERE team_id = ? AND nickname = ?', [teamId, nickname]);
-        let currentScore = 0;
-
-        if (existing.length > 0) {
-          participantId = existing[0].id;
-          currentScore = existing[0].total_score;
-          await Participant.updateSocketId(participantId, socket.id);
-        } else {
-          participantId = await Participant.create(teamId, nickname, socket.id);
-          io.to(`game:${team.game_id}:admin`).emit('participant:new', { participantId, teamId, nickname });
+        if (!team) {
+          return socket.emit('error', { message: 'Time não encontrado!' });
         }
+
+        // MUDANÇA 1: Sempre criar novo participante (sem verificar existência)
+        // Isso permite nomes duplicados (IDs diferentes) e resolve o problema de reconexão
+        const participantId = await Participant.create(teamId, nickname, socket.id);
+        const currentScore = 0; // Novo participante sempre começa com 0
+
+        console.log(`[CONN] Novo: ${nickname} (ID:${participantId} Time:${team.name})`);
+
+        // Notifica admin sobre novo participante
+        io.to(`game:${team.game_id}:admin`).emit('participant:new', {
+          participantId,
+          teamId,
+          nickname
+        });
 
         const gameId = team.game_id;
         socket.join(`game:${gameId}`);
@@ -109,22 +118,16 @@ module.exports = (io) => {
         socket.teamId = teamId;
         socket.gameId = gameId;
 
-        socket.emit('participant:joined', { participantId, teamId, nickname, score: currentScore });
-
-        // Verifica se já respondeu a pergunta atual para mostrar tela de espera
-        const gameState = activeGames.get(gameId);
-        if (gameState) {
-          const [ans] = await pool.execute(
-            'SELECT * FROM participant_answers WHERE participant_id = ? AND question_id = ?',
-            [participantId, gameState.currentQuestionId]
-          );
-          if (ans.length > 0) {
-            socket.emit('participant:answer_registered'); // Manda para tela de espera
-          }
-        }
+        socket.emit('participant:joined', {
+          participantId,
+          teamId,
+          nickname,
+          score: currentScore
+        });
 
         updateLiveCount(gameId);
       } catch (error) {
+        console.log(`[ERROR] participant:join: ${error.message}`);
         socket.emit('error', { message: error.message });
       }
     });
@@ -135,19 +138,30 @@ module.exports = (io) => {
         if (!gameState) return;
 
         const timeTaken = (Date.now() - gameState.startTime) / 1000;
-        if (timeTaken > (gameState.timeLimit + 3)) return socket.emit('answer:result', { success: false, message: 'Tempo esgotado' });
+        if (timeTaken > (gameState.timeLimit + 3)) {
+          return socket.emit('answer:result', {
+            success: false,
+            message: 'Tempo esgotado'
+          });
+        }
 
         const result = await Participant.submitAnswer(participantId, questionId, answerId, timeTaken);
 
         if (result) {
-          // MUDANÇA: Não envia o resultado (pontos) agora. Só confirma o recebimento.
           socket.emit('participant:answer_registered');
 
-          io.to(`game:${socket.gameId}:admin`).emit('participant:answered', { participantId, isCorrect: result.isCorrect });
+          io.to(`game:${socket.gameId}:admin`).emit('participant:answered', {
+            participantId,
+            isCorrect: result.isCorrect
+          });
+
+          console.log(`[ANSWER] P:${participantId} Q:${questionId} OK:${result.isCorrect}`);
+
+          // Verifica se todos responderam (Anti-Travamento)
           checkAllAnswered(socket.gameId, questionId);
         }
       } catch (error) {
-        console.error(error);
+        console.log(`[ERROR] participant:answer: ${error.message}`);
       }
     });
 
@@ -155,13 +169,33 @@ module.exports = (io) => {
     socket.on('display:connect', async (gameId) => {
       socket.join(`game:${gameId}:display`);
       socket.gameId = gameId;
+      console.log(`[DISPLAY] Telão conectado ao jogo ${gameId}`);
       updateLiveCount(gameId);
     });
 
     socket.on('display:timeUp', async (gameId) => sendStats(gameId));
 
-    socket.on('disconnect', () => {
-      if (socket.gameId) updateLiveCount(socket.gameId);
+    // --- DISCONNECT ---
+    socket.on('disconnect', async () => {
+      if (socket.gameId) {
+        const gameId = socket.gameId;
+        const participantId = socket.participantId;
+
+        if (participantId) {
+          console.log(`[DISCONN] P:${participantId} saiu do jogo ${gameId}`);
+        }
+
+        updateLiveCount(gameId);
+
+        // MUDANÇA 2: Verificar se deve encerrar pergunta após desconexão
+        const gameState = activeGames.get(gameId);
+        if (gameState && participantId) {
+          // Pequeno delay para garantir que o socket foi removido da sala antes de contar
+          setTimeout(() => {
+            checkAllAnswered(gameId, gameState.currentQuestionId);
+          }, 500);
+        }
+      }
     });
 
     // --- FUNÇÕES AUXILIARES ---
@@ -181,31 +215,48 @@ module.exports = (io) => {
 
       io.to(`game:${gameId}`).emit('question:new', questionData);
       io.to(`game:${gameId}:display`).emit('question:new', questionData);
-      io.to(`game:${gameId}:admin`).emit('question:new', { ...questionData, correctAnswerId: question.answers.find(a => a.is_correct)?.id });
+      io.to(`game:${gameId}:admin`).emit('question:new', {
+        ...questionData,
+        correctAnswerId: question.answers.find(a => a.is_correct)?.id
+      });
 
       activeGames.set(gameId, {
         currentQuestionId: question.id,
         startTime: Date.now(),
         timeLimit: question.time_limit
       });
+      console.log(`[QUESTION] Jogo ${gameId} - Q${index + 1}/${game.questions.length}`);
     }
 
+    // MUDANÇA 2: Nova lógica anti-travamento
     async function checkAllAnswered(gameId, questionId) {
-      const room = io.sockets.adapter.rooms.get(`game:${gameId}`);
-      if (!room) return;
+      const gameState = activeGames.get(gameId);
+      // Se não há estado ativo ou a pergunta mudou, ignora
+      if (!gameState || gameState.currentQuestionId !== questionId) {
+        return;
+      }
 
+      // Conta sockets de participantes ONLINE agora
       const sockets = await io.in(`game:${gameId}`).fetchSockets();
-      const onlinePlayersCount = sockets.filter(s => s.participantId).length;
+      const onlineParticipants = sockets.filter(s => s.participantId).length;
 
-      const [res] = await pool.execute('SELECT COUNT(*) as total FROM participant_answers WHERE question_id = ?', [questionId]);
+      // Conta respostas no banco para esta pergunta
+      const [res] = await pool.execute(
+        'SELECT COUNT(*) as total FROM participant_answers WHERE question_id = ?',
+        [questionId]
+      );
       const answersCount = res[0].total;
 
-      console.log(`Auto-Finish: Online=${onlinePlayersCount}, Respostas=${answersCount}`);
+      console.log(`[CHECK] Respostas:${answersCount} | Online:${onlineParticipants}`);
 
-      if (onlinePlayersCount > 0 && answersCount >= onlinePlayersCount) {
+      // Se todos que estão online já responderam, encerra
+      if (onlineParticipants > 0 && answersCount >= onlineParticipants) {
+        console.log(`[CHECK] -> Encerrando pergunta!`);
+        // Pequeno delay para UX
         setTimeout(() => {
-          const gameState = activeGames.get(gameId);
-          if (gameState && gameState.currentQuestionId === questionId) {
+          // Verifica novamente se ainda é a mesma pergunta
+          const currentState = activeGames.get(gameId);
+          if (currentState && currentState.currentQuestionId === questionId) {
             sendStats(gameId);
           }
         }, 1000);
@@ -217,14 +268,16 @@ module.exports = (io) => {
       if (!gameState) return;
       const qId = gameState.currentQuestionId;
 
-      // 1. Mandar gráfico para o Telão
+      // 1. Buscar estatísticas para o telão
       const [stats] = await pool.execute(
         `SELECT a.id, a.answer_text as text, a.is_correct, COUNT(pa.id) as count 
          FROM answers a 
          LEFT JOIN participant_answers pa ON pa.answer_id = a.id 
          WHERE a.question_id = ? 
-         GROUP BY a.id ORDER BY a.id ASC`, [qId]
+         GROUP BY a.id ORDER BY a.id ASC`,
+        [qId]
       );
+
       const totalVotes = stats.reduce((sum, i) => sum + i.count, 0);
 
       io.to(`game:${gameId}:display`).emit('question:stats', {
@@ -236,38 +289,30 @@ module.exports = (io) => {
           percent: totalVotes === 0 ? 0 : Math.round((s.count / totalVotes) * 100)
         }))
       });
+      console.log(`[STATS] Q:${qId} Votos:${totalVotes}`);
 
-      // 2. MUDANÇA: Mandar o resultado individual para cada Participante
+      // 2. Mandar resultado individual para cada participante
       const sockets = await io.in(`game:${gameId}`).fetchSockets();
-
-      // Busca todas as respostas dessa pergunta
       const [answers] = await pool.execute(
         'SELECT participant_id, points_earned, time_taken, answer_id FROM participant_answers WHERE question_id = ?',
         [qId]
       );
 
-      // Cria um mapa para acesso rápido
       const answersMap = {};
       answers.forEach(a => answersMap[a.participant_id] = a);
 
-      // Itera sobre cada socket conectado e manda o resultado dele
-      for (const socket of sockets) {
-        if (socket.participantId) {
-          const myAnswer = answersMap[socket.participantId];
-
+      for (const sock of sockets) {
+        if (sock.participantId) {
+          const myAnswer = answersMap[sock.participantId];
           if (myAnswer) {
-            // Descobre se acertou olhando o 'stats' ou fazendo query extra.
-            // Simplificando: se points_earned > 0, acertou.
             const isCorrect = myAnswer.points_earned > 0;
-
-            socket.emit('answer:result', {
+            sock.emit('answer:result', {
               isCorrect: isCorrect,
               pointsEarned: myAnswer.points_earned,
               timeTaken: myAnswer.time_taken
             });
           } else {
-            // Não respondeu a tempo
-            socket.emit('answer:result', {
+            sock.emit('answer:result', {
               isCorrect: false,
               pointsEarned: 0,
               message: "Tempo esgotado!"
@@ -276,7 +321,8 @@ module.exports = (io) => {
         }
       }
     }
-    async function sendRanking(gameId, isFinal = false) { // <--- Adicione isFinal = false
+
+    async function sendRanking(gameId, isFinal = false) {
       const teams = await Team.findByGameId(gameId);
       const ranking = await Promise.all(teams.map(async t => {
         const score = await Team.calculateTotalScore(t.id);
@@ -285,30 +331,32 @@ module.exports = (io) => {
       }));
       ranking.sort((a, b) => b.score - a.score);
 
-      // MUDANÇA AQUI: Adicionar isFinal no envio
       const rankingData = {
         teams: ranking,
         timestamp: Date.now(),
         isFinal: isFinal
       };
 
-      // Envia o objeto novo
       io.to(`game:${gameId}`).emit('ranking:show', rankingData);
-      // IMPORTANTE: Adicionar envio explícito para o display também se não estiver no grupo acima
       io.to(`game:${gameId}:display`).emit('ranking:show', rankingData);
+
+      console.log(`[RANKING] Jogo ${gameId} Final:${isFinal}`);
     }
+
     async function finishGame(gameId) {
       await Game.updateStatus(gameId, 'finished');
       io.to(`game:${gameId}`).emit('game:ended');
       io.to(`game:${gameId}:display`).emit('game:ended');
       io.to(`game:${gameId}:admin`).emit('game:ended');
       activeGames.delete(gameId);
+      console.log(`[GAME] Jogo ${gameId} finalizado`);
     }
 
     async function updateLiveCount(gameId) {
       const sockets = await io.in(`game:${gameId}`).fetchSockets();
       const count = sockets.filter(s => s.participantId).length;
       io.to(`game:${gameId}:display`).emit('participant:update_count', count);
+      console.log(`[LIVE] Jogo ${gameId} Online:${count}`);
     }
   });
 };
