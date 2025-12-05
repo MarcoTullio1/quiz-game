@@ -474,6 +474,7 @@ body {
     }
 }
 
+/* ====== PÓDIO CORRIGIDO ====== */
 .podium {
     display: flex;
     align-items: flex-end;
@@ -486,10 +487,16 @@ body {
     background: rgba(255, 255, 255, 0.2);
     backdrop-filter: blur(20px);
     border-radius: 20px 20px 0 0;
-    padding: 30px;
+    padding: 30px 30px 40px 30px;
+    /* CORREÇÃO: padding inferior aumentado */
     width: 300px;
     position: relative;
     animation: growUp 1s ease;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    /* CORREÇÃO: alinha conteúdo no topo */
 }
 
 @keyframes growUp {
@@ -504,46 +511,55 @@ body {
     }
 }
 
+/* CORREÇÃO: Alturas aumentadas para caber todo conteúdo */
 .podium-item.first {
-    height: 450px;
+    min-height: 480px;
+    /* Era 450px */
     animation-delay: 0.2s;
 }
 
 .podium-item.second {
-    height: 350px;
+    min-height: 380px;
+    /* Era 350px */
     animation-delay: 0.1s;
 }
 
 .podium-item.third {
-    height: 300px;
+    min-height: 330px;
+    /* Era 300px */
     animation-delay: 0s;
 }
 
 .podium-medal {
     font-size: 5rem;
-    margin-bottom: 20px;
+    margin-bottom: 15px;
 }
 
 .podium-position {
     font-size: 3rem;
     font-weight: 900;
-    margin-bottom: 15px;
+    margin-bottom: 10px;
 }
 
 .podium-team {
     font-size: 2rem;
     font-weight: 700;
-    margin-bottom: 10px;
+    margin-bottom: 15px;
+    /* CORREÇÃO: aumentado de 10px */
     min-height: 60px;
     display: flex;
     align-items: center;
     justify-content: center;
+    text-align: center;
+    padding: 0 10px;
 }
 
 .podium-score {
     font-size: 2.5rem;
     font-weight: 900;
     color: #fbbf24;
+    margin-bottom: 20px;
+    /* CORREÇÃO: espaço antes da barra */
 }
 
 .podium-bar {
@@ -554,6 +570,32 @@ body {
     height: 10px;
     background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
     border-radius: 0 0 20px 20px;
+}
+
+/* ====== BADGE DE EMPATE ====== */
+.tie-badge {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    color: white;
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 1rem;
+    font-weight: 700;
+    margin-top: 8px;
+    display: inline-block;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    animation: pulseGlow 2s ease-in-out infinite;
+}
+
+@keyframes pulseGlow {
+
+    0%,
+    100% {
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    }
+
+    50% {
+        box-shadow: 0 4px 20px rgba(245, 158, 11, 0.5);
+    }
 }
 
 .congratulations {
@@ -596,7 +638,7 @@ body {
     .podium-item.first,
     .podium-item.second,
     .podium-item.third {
-        height: auto;
-        min-height: 250px;
+        min-height: auto;
+        padding: 30px;
     }
 }
